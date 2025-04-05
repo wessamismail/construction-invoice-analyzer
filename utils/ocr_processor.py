@@ -1,29 +1,78 @@
 import os
-import pytesseract
+from typing import List, Dict, Any
+import pdfplumber
 from PIL import Image
-import pdf2image
-import cv2
+import io
+import easyocr
 import numpy as np
-from typing import List, Dict, Union, Tuple
-import logging
+import cv2
 
 class OCRProcessor:
     def __init__(self):
         """Initialize the OCR processor with support for Arabic and English."""
-        self.logger = logging.getLogger(__name__)
-        # Configure Tesseract to use both Arabic and English
-        self.languages = 'ara+eng'
+        # Initialize EasyOCR reader with Arabic and English support
+        self.reader = easyocr.Reader(['ar', 'en'])
         
-    def preprocess_image(self, image: np.ndarray) -> np.ndarray:
-        """
-        Preprocess the image to improve OCR accuracy.
+    def process_pdf(self, file_path: str) -> str:
+        """Extract text from PDF file using EasyOCR."""
+        text_content = []
         
-        Args:
-            image (np.ndarray): Input image
+        with pdfplumber.open(file_path) as pdf:
+            for page in pdf.pages:
+                # Convert PDF page to image
+                image = page.to_image()
+                image_bytes = io.BytesIO()
+                image.save(image_bytes, format='PNG')
+                image_bytes = image_bytes.getvalue()
+                
+                # Convert to numpy array for OpenCV
+                nparr = np.frombuffer(image_bytes, np.uint8)
+                img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                
+                # Process with EasyOCR
+                results = self.reader.readtext(img)
+                page_text = ' '.join([text for _, text, _ in results])
+                text_content.append(page_text)
+        
+        return '\n'.join(text_content)
+
+    def process_image(self, file_path: str) -> str:
+        """Extract text from image file using EasyOCR."""
+        # Read image with OpenCV
+        img = cv2.imread(file_path)
+        if img is None:
+            raise Exception(f"Could not read image file: {file_path}")
+        
+        # Process with EasyOCR
+        results = self.reader.readtext(img)
+        return ' '.join([text for _, text, _ in results])
+
+    def extract_text(self, file_path: str) -> str:
+        """Extract text from file (PDF or image) using appropriate method."""
+        try:
+            if file_path.lower().endswith('.pdf'):
+                return self.process_pdf(file_path)
+            else:
+                return self.process_image(file_path)
+        except Exception as e:
+            raise Exception(f"Error extracting text: {str(e)}")
+
+    def detect_language(self, text: str) -> str:
+        """Detect the language of the extracted text."""
+        try:
+            # Simple language detection based on character sets
+            arabic_chars = sum(1 for c in text if '\u0600' <= c <= '\u06FF')
+            english_chars = sum(1 for c in text if 'a' <= c.lower() <= 'z')
             
-        Returns:
-            np.ndarray: Preprocessed image
-        """
+            if arabic_chars > english_chars:
+                return "ar"
+            return "en"
+        except Exception as e:
+            print(f"Error detecting language: {str(e)}")
+            return "en"  # Default to English if detection fails
+
+    def preprocess_image(self, image: np.ndarray) -> np.ndarray:
+        """Preprocess image to improve OCR accuracy."""
         try:
             # Convert to grayscale
             if len(image.shape) == 3:
@@ -31,19 +80,18 @@ class OCRProcessor:
             else:
                 gray = image
 
-            # Apply thresholding to handle shadows and normalize text
-            thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+            # Apply adaptive thresholding
+            thresh = cv2.adaptiveThreshold(
+                gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+                cv2.THRESH_BINARY, 11, 2
+            )
 
-            # Noise removal
-            denoised = cv2.medianBlur(thresh, 3)
+            # Denoise
+            denoised = cv2.fastNlMeansDenoising(thresh)
 
-            # Dilation to make text more prominent
-            kernel = np.ones((1, 1), np.uint8)
-            dilated = cv2.dilate(denoised, kernel, iterations=1)
-
-            return dilated
+            return denoised
         except Exception as e:
-            self.logger.error(f"Error during image preprocessing: {str(e)}")
+            print(f"Error in image preprocessing: {str(e)}")
             return image
 
     def extract_text_from_image(self, image_path: str) -> str:
